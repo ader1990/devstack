@@ -377,6 +377,7 @@ function create_nova_conf() {
     iniset $NOVA_CONF DEFAULT ec2_workers "4"
     iniset $NOVA_CONF DEFAULT metadata_workers "4"
     iniset $NOVA_CONF DEFAULT sql_connection `database_connection_url nova`
+    iniset $NOVA_CONF DEFAULT fatal_deprecations "True"
     iniset $NOVA_CONF DEFAULT instance_name_template "${INSTANCE_NAME_PREFIX}%08x"
     iniset $NOVA_CONF osapi_v3 enabled "True"
 
@@ -464,27 +465,27 @@ function create_nova_conf() {
     fi
 
     if is_service_enabled n-novnc || is_service_enabled n-xvnc; then
-      # Address on which instance vncservers will listen on compute hosts.
-      # For multi-host, this should be the management ip of the compute host.
-      VNCSERVER_LISTEN=${VNCSERVER_LISTEN=127.0.0.1}
-      VNCSERVER_PROXYCLIENT_ADDRESS=${VNCSERVER_PROXYCLIENT_ADDRESS=127.0.0.1}
-      iniset $NOVA_CONF DEFAULT vnc_enabled true
-      iniset $NOVA_CONF DEFAULT vncserver_listen "$VNCSERVER_LISTEN"
-      iniset $NOVA_CONF DEFAULT vncserver_proxyclient_address "$VNCSERVER_PROXYCLIENT_ADDRESS"
+        # Address on which instance vncservers will listen on compute hosts.
+        # For multi-host, this should be the management ip of the compute host.
+        VNCSERVER_LISTEN=${VNCSERVER_LISTEN=127.0.0.1}
+        VNCSERVER_PROXYCLIENT_ADDRESS=${VNCSERVER_PROXYCLIENT_ADDRESS=127.0.0.1}
+        iniset $NOVA_CONF DEFAULT vnc_enabled true
+        iniset $NOVA_CONF DEFAULT vncserver_listen "$VNCSERVER_LISTEN"
+        iniset $NOVA_CONF DEFAULT vncserver_proxyclient_address "$VNCSERVER_PROXYCLIENT_ADDRESS"
     else
-      iniset $NOVA_CONF DEFAULT vnc_enabled false
+        iniset $NOVA_CONF DEFAULT vnc_enabled false
     fi
 
     if is_service_enabled n-spice; then
-      # Address on which instance spiceservers will listen on compute hosts.
-      # For multi-host, this should be the management ip of the compute host.
-      SPICESERVER_PROXYCLIENT_ADDRESS=${SPICESERVER_PROXYCLIENT_ADDRESS=127.0.0.1}
-      SPICESERVER_LISTEN=${SPICESERVER_LISTEN=127.0.0.1}
-      iniset $NOVA_CONF spice enabled true
-      iniset $NOVA_CONF spice server_listen "$SPICESERVER_LISTEN"
-      iniset $NOVA_CONF spice server_proxyclient_address "$SPICESERVER_PROXYCLIENT_ADDRESS"
+        # Address on which instance spiceservers will listen on compute hosts.
+        # For multi-host, this should be the management ip of the compute host.
+        SPICESERVER_PROXYCLIENT_ADDRESS=${SPICESERVER_PROXYCLIENT_ADDRESS=127.0.0.1}
+        SPICESERVER_LISTEN=${SPICESERVER_LISTEN=127.0.0.1}
+        iniset $NOVA_CONF spice enabled true
+        iniset $NOVA_CONF spice server_listen "$SPICESERVER_LISTEN"
+        iniset $NOVA_CONF spice server_proxyclient_address "$SPICESERVER_PROXYCLIENT_ADDRESS"
     else
-      iniset $NOVA_CONF spice enabled false
+        iniset $NOVA_CONF spice enabled false
     fi
 
     iniset $NOVA_CONF DEFAULT ec2_dmz_host "$EC2_DMZ_HOST"
@@ -601,7 +602,7 @@ function start_nova_api() {
     screen_it n-api "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-api"
     echo "Waiting for nova-api to start..."
     if ! wait_for_service $SERVICE_TIMEOUT http://$SERVICE_HOST:$service_port; then
-      die $LINENO "nova-api did not start"
+        die $LINENO "nova-api did not start"
     fi
 
     # Start proxies if enabled
@@ -610,8 +611,28 @@ function start_nova_api() {
     fi
 }
 
+# start_nova_compute() - Start the compute process
+function start_nova_compute() {
+    NOVA_CONF_BOTTOM=$NOVA_CONF
+
+    if [[ "$VIRT_DRIVER" = 'libvirt' ]]; then
+        # The group **$LIBVIRT_GROUP** is added to the current user in this script.
+        # Use 'sg' to execute nova-compute as a member of the **$LIBVIRT_GROUP** group.
+        screen_it n-cpu "cd $NOVA_DIR && sg $LIBVIRT_GROUP '$NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM'"
+    elif [[ "$VIRT_DRIVER" = 'fake' ]]; then
+        for i in `seq 1 $NUMBER_FAKE_NOVA_COMPUTE`; do
+            screen_it n-cpu "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM"
+        done
+    else
+        if is_service_enabled n-cpu && [[ -r $NOVA_PLUGINS/hypervisor-$VIRT_DRIVER ]]; then
+            start_nova_hypervisor
+        fi
+        screen_it n-cpu "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM"
+    fi
+}
+
 # start_nova() - Start running processes, including screen
-function start_nova() {
+function start_nova_rest() {
     NOVA_CONF_BOTTOM=$NOVA_CONF
 
     # ``screen_it`` checks ``is_service_enabled``, it is not needed here
@@ -624,21 +645,6 @@ function start_nova() {
         screen_it n-cell-child "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-cells --config-file $NOVA_CELLS_CONF"
     fi
 
-    if [[ "$VIRT_DRIVER" = 'libvirt' ]]; then
-        # The group **$LIBVIRT_GROUP** is added to the current user in this script.
-        # Use 'sg' to execute nova-compute as a member of the **$LIBVIRT_GROUP** group.
-        screen_it n-cpu "cd $NOVA_DIR && sg $LIBVIRT_GROUP '$NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM'"
-    elif [[ "$VIRT_DRIVER" = 'fake' ]]; then
-       for i in `seq 1 $NUMBER_FAKE_NOVA_COMPUTE`
-       do
-           screen_it n-cpu "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM"
-       done
-    else
-        if is_service_enabled n-cpu && [[ -r $NOVA_PLUGINS/hypervisor-$VIRT_DRIVER ]]; then
-            start_nova_hypervisor
-        fi
-        screen_it n-cpu "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-compute --config-file $NOVA_CONF_BOTTOM"
-    fi
     screen_it n-crt "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-cert"
     screen_it n-net "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-network --config-file $NOVA_CONF_BOTTOM"
     screen_it n-sch "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-scheduler --config-file $NOVA_CONF_BOTTOM"
@@ -653,6 +659,11 @@ function start_nova() {
     # Swift will act as s3 objectstore.
     is_service_enabled swift3 || \
         screen_it n-obj "cd $NOVA_DIR && $NOVA_BIN_DIR/nova-objectstore"
+}
+
+function start_nova() {
+    start_nova_compute
+    start_nova_rest
 }
 
 # stop_nova() - Stop running processes (non-screen)
